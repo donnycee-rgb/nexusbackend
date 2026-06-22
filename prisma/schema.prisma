@@ -1,0 +1,269 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform {
+  instagram
+  tiktok
+  facebook
+  x
+  youtube
+  whatsapp
+  linkedin
+}
+
+enum PlatformConnectionStatus {
+  connected
+  expiring
+  disconnected
+}
+
+enum PostStatus {
+  draft
+  scheduled
+  published
+}
+
+enum PostType {
+  image
+  video
+}
+
+enum WorkspaceRole {
+  admin
+  member
+}
+
+enum NotificationType {
+  message
+  publish
+  approval
+  system
+  follow
+}
+
+enum NotificationSeverity {
+  info
+  success
+  warning
+  danger
+}
+
+enum MessageSender {
+  client
+  agent
+}
+
+enum SchedulerStatus {
+  draft
+  scheduled
+}
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  avatar       String?
+  title        String?
+  twoFaSecret  String   @map("two_fa_secret")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  refreshTokens RefreshToken[]
+  memberships   WorkspaceMember[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Workspace {
+  id       String @id @default(uuid())
+  company  String
+  initials String
+  color    String
+  timezone String
+
+  members             WorkspaceMember[]
+  posts               Post[]
+  notifications       Notification[]
+  messageThreads      MessageThread[]
+  analytics           Analytics?
+  schedulerSlots      SchedulerSlot[]
+  platformConnections PlatformConnection[]
+  hiddenPosts         HiddenPost[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  workspaceId String        @map("workspace_id")
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String        @map("user_id")
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        WorkspaceRole
+  permissions String[]
+  joinedAt    DateTime      @default(now()) @map("joined_at")
+
+  @@id([workspaceId, userId])
+  @@map("workspace_members")
+}
+
+model Post {
+  id           String     @id @default(uuid())
+  workspaceId  String     @map("workspace_id")
+  workspace    Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  authorId     String?    @map("author_id")
+  title        String
+  caption      String
+  platforms    Platform[]
+  status       PostStatus
+  type         PostType
+  mediaUrls    String[]   @map("media_urls")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  publishedAt  DateTime?  @map("published_at")
+  scheduledFor DateTime?  @map("scheduled_for")
+
+  metrics        PostMetric[]
+  schedulerSlots SchedulerSlot[]
+  hiddenIn       HiddenPost[]
+
+  @@index([workspaceId])
+  @@map("posts")
+}
+
+model PostMetric {
+  id             String   @id @default(uuid())
+  postId         String   @map("post_id")
+  post           Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  platform       Platform
+  impressions    Int      @default(0)
+  reach          Int      @default(0)
+  likes          Int      @default(0)
+  comments       Int      @default(0)
+  shares         Int      @default(0)
+  saves          Int      @default(0)
+  engagementRate Float    @default(0) @map("engagement_rate")
+  capturedAt     DateTime @default(now()) @map("captured_at")
+
+  @@index([postId])
+  @@map("post_metrics")
+}
+
+model HiddenPost {
+  workspaceId String    @map("workspace_id")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  postId      String    @map("post_id")
+  post        Post      @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@id([workspaceId, postId])
+  @@map("hidden_posts")
+}
+
+model MessageThread {
+  id                  String    @id @default(uuid())
+  workspaceId         String    @map("workspace_id")
+  workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform            Platform
+  participantId       String    @map("participant_id")
+  participantName     String    @map("participant_name")
+  participantHandle   String    @map("participant_handle")
+  participantInitials String    @map("participant_initials")
+  lastMessageAt       DateTime  @map("last_message_at")
+  pinned              Boolean   @default(false)
+
+  messages Message[]
+
+  @@index([workspaceId])
+  @@map("message_threads")
+}
+
+model Message {
+  id         String        @id @default(uuid())
+  threadId   String        @map("thread_id")
+  thread     MessageThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender     MessageSender
+  senderName String        @map("sender_name")
+  body       String
+  sentAt     DateTime      @default(now()) @map("sent_at")
+  readAt     DateTime?     @map("read_at")
+
+  @@index([threadId])
+  @@map("messages")
+}
+
+model Notification {
+  id          String               @id @default(uuid())
+  workspaceId String               @map("workspace_id")
+  workspace   Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  type        NotificationType
+  severity    NotificationSeverity
+  title       String
+  body        String
+  createdAt   DateTime             @default(now()) @map("created_at")
+  read        Boolean              @default(false)
+
+  @@index([workspaceId])
+  @@map("notifications")
+}
+
+model Analytics {
+  workspaceId        String    @id @map("workspace_id")
+  workspace          Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  range              String    @map("range_label")
+  summary            Json
+  engagementTrend    Json      @map("engagement_trend")
+  reachTrend         Json      @map("reach_trend")
+  platformBreakdown  Json      @map("platform_breakdown")
+
+  @@map("analytics")
+}
+
+model SchedulerSlot {
+  id           String          @id @default(uuid())
+  workspaceId  String          @map("workspace_id")
+  workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  title        String
+  platforms    Platform[]
+  scheduledFor DateTime        @map("scheduled_for")
+  status       SchedulerStatus
+  postId       String?         @map("post_id")
+  post         Post?           @relation(fields: [postId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+  @@map("scheduler_slots")
+}
+
+model PlatformConnection {
+  id                    String                   @id @default(uuid())
+  workspaceId           String                   @map("workspace_id")
+  workspace             Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform              Platform
+  status                PlatformConnectionStatus
+  externalAccountId     String?                  @map("external_account_id")
+  account               String
+  followers             Int                      @default(0)
+  bio                   String                   @default("")
+  website               String                   @default("")
+  accessTokenEncrypted  String?                  @map("access_token_encrypted")
+  refreshTokenEncrypted String?                  @map("refresh_token_encrypted")
+  tokenExpiresAt        DateTime?                @map("token_expires_at")
+
+  @@index([workspaceId])
+  @@map("platform_connections")
+}
