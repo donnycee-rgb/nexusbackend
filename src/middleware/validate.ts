@@ -31,12 +31,52 @@ export const loginSchema = z.object({
   }),
 });
 
+const PLATFORM_VALUES = [
+  'instagram', 'tiktok', 'facebook', 'x', 'youtube', 'whatsapp', 'linkedin',
+] as const;
+
+const PERMISSION_VALUES = [
+  'compose_posts', 'publish_posts', 'delete_posts', 'view_analytics',
+  'reply_messages', 'schedule_posts', 'manage_profiles', 'use_kill_switch', 'access_admin',
+] as const;
+
+const ROLE_VALUES = ['admin', 'member'] as const;
+
 export const registerSchema = z.object({
   body: z.object({
     name: z.string().trim().min(1).max(100),
     email: z.string().email().max(255),
     password: z.string().min(8).max(128),
     companyName: z.string().trim().min(1).max(100),
+    platforms: z.array(z.enum(PLATFORM_VALUES)).min(1, 'Select at least one platform'),
+  }),
+});
+
+export const createWorkspaceSchema = z.object({
+  body: z.object({
+    companyName: z.string().trim().min(1).max(100),
+    platforms: z.array(z.enum(PLATFORM_VALUES)).min(1, 'Select at least one platform'),
+  }),
+});
+
+export const createInviteSchema = z.object({
+  params: z.object({ workspaceId: z.string().uuid() }),
+  body: z.object({
+    role: z.enum(ROLE_VALUES),
+    permissions: z.array(z.enum(PERMISSION_VALUES)).min(1, 'Grant at least one permission'),
+  }),
+});
+
+export const inviteParamSchema = z.object({
+  params: z.object({
+    workspaceId: z.string().uuid(),
+    inviteId: z.string().uuid(),
+  }),
+});
+
+export const redeemInviteSchema = z.object({
+  body: z.object({
+    token: z.string().min(1),
   }),
 });
 

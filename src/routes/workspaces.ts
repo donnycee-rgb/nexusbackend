@@ -1,5 +1,7 @@
+// FILE PATH: src/routes/workspaces.ts
 import { Router } from 'express';
-import { requireAuth, requireWorkspaceAccess } from '../middleware/auth.js';
+import type { Platform } from '@prisma/client';
+import { requireAuth, requireWorkspaceAccess, requirePermission, requireRole } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import {
   validate,
@@ -11,6 +13,10 @@ import {
   schedulerParamSchema,
   notificationParamSchema,
   platformParamSchema,
+  createWorkspaceSchema,
+  createInviteSchema,
+  inviteParamSchema,
+  redeemInviteSchema,
 } from '../middleware/validate.js';
 import {
   getWorkspacePosts,
@@ -30,6 +36,11 @@ import {
   disconnectPlatform,
   getWorkspaceTeam,
   resetWorkspaceData,
+  createWorkspace,
+  createInvite,
+  getInvites,
+  revokeInvite,
+  redeemInvite,
 } from '../services/workspaceService.js';
 import { PLATFORM_META, ALL_PERMISSIONS, MOCK_SONGS } from '../constants/metadata.js';
 import { param } from '../utils/param.js';
@@ -37,6 +48,19 @@ import { param } from '../utils/param.js';
 const router = Router();
 
 router.use(requireAuth);
+
+router.post(
+  '/',
+  validate(createWorkspaceSchema),
+  asyncHandler(async (req, res) => {
+    const { companyName, platforms } = req.validated!.body as {
+      companyName: string;
+      platforms: Platform[];
+    };
+    const workspace = await createWorkspace(req.user!.id, companyName, platforms);
+    res.status(201).json({ workspace });
+  }),
+);
 
 router.get('/meta/platform-meta', (_req, res) => {
   res.json({ platformMeta: PLATFORM_META });
@@ -66,6 +90,7 @@ router.post(
   '/:workspaceId/posts',
   validate(createPostSchema),
   requireWorkspaceAccess,
+  requirePermission('compose_posts'),
   asyncHandler(async (req, res) => {
     const post = await createPost(param(req.params['workspaceId']), req.validated!.body);
     res.status(201).json({ post });
@@ -76,6 +101,7 @@ router.delete(
   '/:workspaceId/posts/:postId',
   validate(postParamSchema),
   requireWorkspaceAccess,
+  requirePermission('delete_posts'),
   asyncHandler(async (req, res) => {
     await deletePost(param(req.params['workspaceId']), param(req.params['postId']));
     res.json({ success: true });
@@ -126,6 +152,7 @@ router.get(
   '/:workspaceId/messages',
   validate(workspaceParamSchema),
   requireWorkspaceAccess,
+  requirePermission('reply_messages'),
   asyncHandler(async (req, res) => {
     const threads = await getWorkspaceMessages(param(req.params['workspaceId']));
     res.json({ threads });
@@ -136,6 +163,7 @@ router.get(
   '/:workspaceId/analytics',
   validate(workspaceParamSchema),
   requireWorkspaceAccess,
+  requirePermission('view_analytics'),
   asyncHandler(async (req, res) => {
     const analytics = await getWorkspaceAnalytics(param(req.params['workspaceId']));
     res.json({ analytics });
@@ -156,6 +184,7 @@ router.post(
   '/:workspaceId/scheduler',
   validate(createSchedulerSchema),
   requireWorkspaceAccess,
+  requirePermission('schedule_posts'),
   asyncHandler(async (req, res) => {
     const slot = await createSchedulerSlot(param(req.params['workspaceId']), req.validated!.body);
     res.status(201).json({ slot });
@@ -166,6 +195,7 @@ router.delete(
   '/:workspaceId/scheduler/:slotId',
   validate(schedulerParamSchema),
   requireWorkspaceAccess,
+  requirePermission('schedule_posts'),
   asyncHandler(async (req, res) => {
     await cancelSchedulerSlot(param(req.params['workspaceId']), param(req.params['slotId']));
     res.json({ success: true });
@@ -186,6 +216,7 @@ router.patch(
   '/:workspaceId/platforms/:platformId',
   validate(updatePlatformSchema),
   requireWorkspaceAccess,
+  requirePermission('manage_profiles'),
   asyncHandler(async (req, res) => {
     const platform = await updatePlatformConnection(
       param(req.params['workspaceId']),
@@ -200,6 +231,7 @@ router.post(
   '/:workspaceId/platforms/:platformId/disconnect',
   validate(platformParamSchema),
   requireWorkspaceAccess,
+  requirePermission('manage_profiles'),
   asyncHandler(async (req, res) => {
     await disconnectPlatform(param(req.params['workspaceId']), param(req.params['platformId']));
     res.json({ success: true });
@@ -210,9 +242,70 @@ router.get(
   '/:workspaceId/team',
   validate(workspaceParamSchema),
   requireWorkspaceAccess,
+  requirePermission('access_admin'),
   asyncHandler(async (req, res) => {
     const team = await getWorkspaceTeam(param(req.params['workspaceId']));
     res.json({ team });
+  }),
+);
+
+// ── Invites ──────────────────────────────────────────────────────────────────
+
+router.get(
+  '/:workspaceId/invites',
+  validate(workspaceParamSchema),
+  requireWorkspaceAccess,
+  requirePermission('access_admin'),
+  asyncHandler(async (req, res) => {
+    const invites = await getInvites(param(req.params['workspaceId']));
+    res.json({ invites });
+  }),
+);
+
+router.post(
+  '/:workspaceId/invites',
+  validate(createInviteSchema),
+  requireWorkspaceAccess,
+  requirePermission('access_admin'),
+  asyncHandler(async (req, res) => {
+    const { role, permissions } = req.validated!.body as {
+      role: 'admin' | 'member';
+      permissions: string[];
+    };
+    const result = await createInvite(
+      param(req.params['workspaceId']),
+      req.user!.id,
+      { role, permissions },
+    );
+    res.status(201).json(result);
+  }),
+);
+
+router.delete(
+  '/:workspaceId/invites/:inviteId',
+  validate(inviteParamSchema),
+  requireWorkspaceAccess,
+  requirePermission('access_admin'),
+  asyncHandler(async (req, res) => {
+    await revokeInvite(
+      param(req.params['workspaceId']),
+      param(req.params['inviteId']),
+    );
+    res.json({ success: true });
+  }),
+);
+
+// Redeem route — authenticated but no workspace context yet (user is joining)
+router.post(
+  '/invites/redeem',
+  validate(redeemInviteSchema),
+  asyncHandler(async (req, res) => {
+    const { token } = req.validated!.body as { token: string };
+    const result = await redeemInvite(token, req.user!.id);
+    // Return updated workspace list so frontend can refresh immediately
+    const { getUserWorkspaces } = await import('../services/workspaceService.js');
+    const workspaces = await getUserWorkspaces(req.user!.id);
+    res.json({ workspaceId: result.workspaceId, workspaces });
   }),
 );
 
@@ -220,6 +313,7 @@ router.post(
   '/:workspaceId/reset',
   validate(workspaceParamSchema),
   requireWorkspaceAccess,
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     await resetWorkspaceData(param(req.params['workspaceId']));
     res.json({ success: true });

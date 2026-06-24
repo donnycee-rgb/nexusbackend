@@ -1,3 +1,4 @@
+// FILE PATH: src/services/workspaceService.ts
 import { randomUUID } from 'node:crypto';
 import type {
   Message,
@@ -10,6 +11,7 @@ import type {
   PostType,
   SchedulerSlot,
 } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma.js';
 import { hashPassword, hashToken, verifyPassword } from '../utils/passwords.js';
 import { signAccessToken, signRefreshToken } from '../utils/jwt.js';
@@ -188,11 +190,31 @@ function pickWorkspaceColor(seed: string): string {
   return WORKSPACE_COLORS[hash % WORKSPACE_COLORS.length]!;
 }
 
+// Creates a placeholder row per selected platform with status 'disconnected' —
+// not a real connection yet, just recording intent until real OAuth (per platform)
+// activates it later by filling in account/tokens and flipping status to 'connected'.
+async function createPlatformStubs(
+  tx: Prisma.TransactionClient,
+  workspaceId: string,
+  platforms: Platform[],
+) {
+  if (platforms.length === 0) return;
+  await tx.platformConnection.createMany({
+    data: platforms.map((platform) => ({
+      workspaceId,
+      platform,
+      status: 'disconnected' as const,
+      account: '',
+    })),
+  });
+}
+
 export async function registerUser(input: {
   name: string;
   email: string;
   password: string;
   companyName: string;
+  platforms: Platform[];
 }) {
   const email = input.email.trim().toLowerCase();
 
@@ -235,6 +257,8 @@ export async function registerUser(input: {
       },
     });
 
+    await createPlatformStubs(tx, workspace.id, input.platforms);
+
     return { user, workspace };
   });
 
@@ -258,6 +282,46 @@ export async function registerUser(input: {
       secret: totpSecret,
       otpauthUrl,
     },
+  };
+}
+
+export async function createWorkspace(userId: string, companyName: string, platforms: Platform[]) {
+  const company = companyName.trim();
+
+  const workspace = await prisma.$transaction(async (tx) => {
+    const workspace = await tx.workspace.create({
+      data: {
+        company,
+        initials: deriveInitials(company),
+        color: pickWorkspaceColor(company),
+        timezone: 'UTC',
+      },
+    });
+
+    await tx.workspaceMember.create({
+      data: {
+        workspaceId: workspace.id,
+        userId,
+        role: 'admin',
+        permissions: [...ALL_PERMISSIONS],
+      },
+    });
+
+    await createPlatformStubs(tx, workspace.id, platforms);
+
+    return workspace;
+  });
+
+  return {
+    id: workspace.id,
+    company: workspace.company,
+    initials: workspace.initials,
+    color: workspace.color,
+    timezone: workspace.timezone,
+    membersCount: 1,
+    role: 'admin' as const,
+    permissions: [...ALL_PERMISSIONS],
+    platforms,
   };
 }
 
@@ -346,7 +410,6 @@ export async function getUserWorkspaces(userId: string) {
         include: {
           _count: { select: { members: true } },
           platformConnections: {
-            where: { status: 'connected' },
             select: { platform: true },
             distinct: ['platform'],
           },
@@ -364,6 +427,7 @@ export async function getUserWorkspaces(userId: string) {
     timezone: m.workspace.timezone,
     membersCount: m.workspace._count.members,
     role: m.role,
+    permissions: m.permissions,
     platforms: m.workspace.platformConnections.map((p) => p.platform),
   }));
 }
@@ -613,6 +677,85 @@ export async function getWorkspaceTeam(workspaceId: string) {
     joined: r.joinedAt.toISOString().slice(0, 10),
     permissions: r.permissions,
   }));
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const db = prisma as any;
+
+export async function createInvite(
+  workspaceId: string,
+  createdById: string,
+  input: { role: 'admin' | 'member'; permissions: string[] },
+) {
+  const { randomBytes } = await import('node:crypto');
+  const rawToken = randomBytes(32).toString('hex');
+  const tokenHash = await hashToken(rawToken);
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+
+  await db.workspaceInvite.create({
+    data: { workspaceId, createdById, role: input.role, permissions: input.permissions, tokenHash, expiresAt },
+  });
+
+  return { token: rawToken, expiresAt };
+}
+
+export async function getInvites(workspaceId: string) {
+  const rows = await db.workspaceInvite.findMany({
+    where: { workspaceId, redeemedAt: null, expiresAt: { gt: new Date() } },
+    include: { createdBy: { select: { name: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  return rows.map((r: any) => ({
+    id: r.id as string,
+    role: r.role as string,
+    permissions: r.permissions as string[],
+    createdBy: r.createdBy.name as string,
+    createdAt: (r.createdAt as Date).toISOString(),
+    expiresAt: (r.expiresAt as Date).toISOString(),
+  }));
+}
+
+export async function revokeInvite(workspaceId: string, inviteId: string) {
+  const invite = await db.workspaceInvite.findFirst({ where: { id: inviteId, workspaceId } });
+  if (!invite) throw new AppError('Invite not found', 404, 'NOT_FOUND');
+  await db.workspaceInvite.delete({ where: { id: inviteId } });
+}
+
+export async function redeemInvite(token: string, userId: string) {
+  const invites: any[] = await db.workspaceInvite.findMany({
+    where: { redeemedAt: null, expiresAt: { gt: new Date() } },
+  });
+
+  let matched: any = null;
+  for (const inv of invites) {
+    const ok = await verifyPassword(token, inv.tokenHash as string);
+    if (ok) { matched = inv; break; }
+  }
+
+  if (!matched) throw new AppError('Invite link is invalid or has expired', 400, 'INVITE_INVALID');
+
+  const existing = await prisma.workspaceMember.findFirst({
+    where: { workspaceId: matched.workspaceId as string, userId },
+  });
+  if (existing) throw new AppError('You are already a member of this workspace', 409, 'ALREADY_MEMBER');
+
+  await prisma.$transaction([
+    prisma.workspaceMember.create({
+      data: {
+        workspaceId: matched.workspaceId as string,
+        userId,
+        role: matched.role as 'admin' | 'member',
+        permissions: matched.permissions as string[],
+      },
+    }),
+    db.workspaceInvite.update({
+      where: { id: matched.id as string },
+      data: { redeemedAt: new Date(), redeemedBy: userId },
+    }),
+  ]);
+
+  return { workspaceId: matched.workspaceId as string };
 }
 
 export async function resetWorkspaceData(workspaceId: string) {

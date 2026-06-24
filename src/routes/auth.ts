@@ -1,10 +1,14 @@
+// FILE PATH: src/routes/auth.ts
 import { Router } from 'express';
+import type { Platform } from '@prisma/client';
 import { authCookieOptions } from '../utils/jwt.js';
 import { authLimiter, twoFaLimiter } from '../middleware/rateLimiter.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { asyncHandler, AppError } from '../middleware/errorHandler.js';
 import { requireAuth, requirePendingTwoFA } from '../middleware/auth.js';
 import { validate, loginSchema, registerSchema, twoFaSchema } from '../middleware/validate.js';
 import { loginUser, registerUser, verifyTwoFA, getUserWorkspaces } from '../services/workspaceService.js';
+import { prisma } from '../lib/prisma.js';
+import { verifyPassword } from '../utils/passwords.js';
 
 const router = Router();
 
@@ -13,13 +17,14 @@ router.post(
   authLimiter,
   validate(registerSchema),
   asyncHandler(async (req, res) => {
-    const { name, email, password, companyName } = req.validated!.body as {
+    const { name, email, password, companyName, platforms } = req.validated!.body as {
       name: string;
       email: string;
       password: string;
       companyName: string;
+      platforms: Platform[];
     };
-    const result = await registerUser({ name, email, password, companyName });
+    const result = await registerUser({ name, email, password, companyName, platforms });
     res.json(result);
   }),
 );
@@ -70,5 +75,37 @@ router.post('/logout', (_req, res) => {
   res.clearCookie('refreshToken', { path: '/api/auth' });
   res.json({ success: true });
 });
+
+// Public invite preview — returns workspace name + role so the
+// invite acceptance page can show context before login/signup
+router.get(
+  '/invite-preview/:token',
+  asyncHandler(async (req, res) => {
+    const rawToken = String(req.params['token'] ?? '');
+    if (!rawToken) throw new AppError('Token required', 400, 'BAD_REQUEST');
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const invites: any[] = await (prisma as any).workspaceInvite.findMany({
+      where: { redeemedAt: null, expiresAt: { gt: new Date() } },
+      include: { workspace: { select: { company: true, color: true, initials: true } } },
+    });
+
+    let matched: any = null;
+    for (const inv of invites) {
+      const ok = await verifyPassword(rawToken, inv.tokenHash as string);
+      if (ok) { matched = inv; break; }
+    }
+
+    if (!matched) throw new AppError('Invite link is invalid or has expired', 400, 'INVITE_INVALID');
+
+    res.json({
+      workspaceId: matched.workspaceId as string,
+      company: matched.workspace.company as string,
+      color: matched.workspace.color as string,
+      initials: matched.workspace.initials as string,
+      role: matched.role as string,
+    });
+  }),
+);
 
 export default router;

@@ -1,3 +1,4 @@
+// FILE PATH: src/middleware/auth.ts
 import type { NextFunction, Request, Response } from 'express';
 import { prisma } from '../lib/prisma.js';
 import { verifyAccessToken } from '../utils/jwt.js';
@@ -100,4 +101,52 @@ export async function requireWorkspaceAccess(
   };
 
   next();
+}
+
+/**
+ * Require a specific permission on the current workspace membership.
+ * Must be used AFTER requireWorkspaceAccess so req.workspace is populated.
+ *
+ * Usage: requirePermission('publish_posts')
+ */
+export function requirePermission(
+  permission: string,
+): (req: Request, _res: Response, next: NextFunction) => void {
+  return (req, _res, next) => {
+    if (!req.workspace) {
+      next(new AppError('Workspace context missing', 500, 'INTERNAL_ERROR'));
+      return;
+    }
+    if (!req.workspace.permissions.includes(permission)) {
+      next(
+        new AppError(
+          `You don't have permission to perform this action (${permission})`,
+          403,
+          'FORBIDDEN',
+        ),
+      );
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * Require admin role on the current workspace.
+ * Must be used AFTER requireWorkspaceAccess so req.workspace is populated.
+ */
+export function requireRole(
+  role: 'admin',
+): (req: Request, _res: Response, next: NextFunction) => void {
+  return (req, _res, next) => {
+    if (!req.workspace) {
+      next(new AppError('Workspace context missing', 500, 'INTERNAL_ERROR'));
+      return;
+    }
+    if (req.workspace.role !== role) {
+      next(new AppError('Admin access required', 403, 'FORBIDDEN'));
+      return;
+    }
+    next();
+  };
 }
